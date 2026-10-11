@@ -4,98 +4,94 @@ import hashlib
 import sqlite3
 import subprocess
 import threading
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 
 
 # ============================================================
-# 1. CONFIGURATION
+# CONFIG
 # ============================================================
+
+APP_NAME = "Owner Security Manager"
 
 APP_DIR = Path.home() / "OwnerSecurityManager"
-
 QUARANTINE_DIR = APP_DIR / "quarantine"
-
-DB_PATH = APP_DIR / "security.db"
+DATABASE_FILE = APP_DIR / "security.db"
 
 APP_DIR.mkdir(parents=True, exist_ok=True)
 QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Default credentials for first run.
+# Change these before publishing a real deployment.
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "nuth112")
+OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "112211")
 
-# ============================================================
-# 2. OWNER ACCOUNT
-# ============================================================
-
-OWNER_USERNAME = "nuth112"
-
-OWNER_PASSWORD = "112211"
-
-OWNER_PASSWORD_HASH = hashlib.sha256(
-    OWNER_PASSWORD.encode()
-).hexdigest()
+SCANNER_ENABLED = True
 
 
 # ============================================================
-# 3. DATABASE
+# DATABASE
 # ============================================================
 
-def database():
+def get_database():
+    connection = sqlite3.connect(DATABASE_FILE)
 
-    con = sqlite3.connect(DB_PATH)
-
-    con.execute("""
+    connection.execute("""
         CREATE TABLE IF NOT EXISTS scan_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            path TEXT NOT NULL,
+            file_path TEXT NOT NULL,
             result TEXT NOT NULL,
             details TEXT,
             scan_time TEXT NOT NULL
         )
     """)
 
-    con.commit()
+    connection.commit()
 
-    return con
+    return connection
 
 
-def save_history(path, result, details=""):
+def save_scan_history(file_path, result, details=""):
 
-    con = database()
+    connection = get_database()
 
-    con.execute(
+    connection.execute(
         """
         INSERT INTO scan_history
-        (path, result, details, scan_time)
+        (file_path, result, details, scan_time)
         VALUES (?, ?, ?, ?)
         """,
         (
-            str(path),
+            str(file_path),
             result,
-            details[:2000],
-            datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            details[:3000],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
     )
 
-    con.commit()
-    con.close()
+    connection.commit()
+    connection.close()
 
 
 # ============================================================
-# 4. PASSWORD CHECK
+# AUTHENTICATION
 # ============================================================
 
 def hash_password(password):
 
     return hashlib.sha256(
-        password.encode()
+        password.encode("utf-8")
     ).hexdigest()
 
 
-def check_login(username, password):
+OWNER_PASSWORD_HASH = hash_password(
+    OWNER_PASSWORD
+)
+
+
+def verify_login(username, password):
 
     return (
         username == OWNER_USERNAME
@@ -106,18 +102,18 @@ def check_login(username, password):
 
 
 # ============================================================
-# 5. CLAMAV FILE SCANNER
+# CLAMAV
 # ============================================================
 
-def scan_file(path):
+def scan_file(file_path):
 
     try:
 
-        result = subprocess.run(
+        process = subprocess.run(
             [
                 "clamscan",
                 "--no-summary",
-                str(path)
+                str(file_path)
             ],
             capture_output=True,
             text=True,
@@ -125,66 +121,54 @@ def scan_file(path):
         )
 
         output = (
-            result.stdout or ""
+            process.stdout or ""
         ) + (
-            result.stderr or ""
+            process.stderr or ""
         )
 
         if "FOUND" in output:
 
-            return (
-                "INFECTED",
-                output
-            )
+            return "INFECTED", output
 
         if "OK" in output:
 
-            return (
-                "CLEAN",
-                output
-            )
+            return "CLEAN", output
 
-        return (
-            "ERROR",
-            output
-        )
+        return "ERROR", output
 
     except FileNotFoundError:
 
         return (
             "ERROR",
-            "ClamAV was not found."
+            "ClamAV was not found. "
+            "Install ClamAV and add clamscan to PATH."
         )
 
     except subprocess.TimeoutExpired:
 
         return (
             "ERROR",
-            "Scan timeout."
+            "Scan timed out."
         )
 
-    except Exception as e:
+    except Exception as error:
 
         return (
             "ERROR",
-            str(e)
+            str(error)
         )
 
 
-# ============================================================
-# 6. FOLDER SCANNER
-# ============================================================
-
-def scan_folder(folder):
+def scan_folder(folder_path):
 
     try:
 
-        result = subprocess.run(
+        process = subprocess.run(
             [
                 "clamscan",
                 "-r",
                 "--no-summary",
-                str(folder)
+                str(folder_path)
             ],
             capture_output=True,
             text=True,
@@ -192,9 +176,9 @@ def scan_folder(folder):
         )
 
         output = (
-            result.stdout or ""
+            process.stdout or ""
         ) + (
-            result.stderr or ""
+            process.stderr or ""
         )
 
         infected = []
@@ -212,17 +196,7 @@ def scan_folder(folder):
                 "\n".join(infected)
             )
 
-        if "ERROR" in output.upper():
-
-            return (
-                "ERROR",
-                output
-            )
-
-        return (
-            "CLEAN",
-            output
-        )
+        return "CLEAN", output
 
     except FileNotFoundError:
 
@@ -231,16 +205,23 @@ def scan_folder(folder):
             "ClamAV was not found."
         )
 
-    except Exception as e:
+    except subprocess.TimeoutExpired:
 
         return (
             "ERROR",
-            str(e)
+            "Folder scan timed out."
+        )
+
+    except Exception as error:
+
+        return (
+            "ERROR",
+            str(error)
         )
 
 
 # ============================================================
-# 7. LOGIN WINDOW
+# LOGIN WINDOW
 # ============================================================
 
 class LoginWindow(tk.Tk):
@@ -250,7 +231,7 @@ class LoginWindow(tk.Tk):
         super().__init__()
 
         self.title(
-            "Owner Security Manager - Login"
+            f"{APP_NAME} - Login"
         )
 
         self.geometry(
@@ -281,11 +262,7 @@ class LoginWindow(tk.Tk):
         tk.Label(
             frame,
             text="🛡️ Owner Security Manager",
-            font=(
-                "Segoe UI",
-                18,
-                "bold"
-            ),
+            font=("Segoe UI", 18, "bold"),
             fg="white",
             bg="#101820"
         ).pack(
@@ -295,7 +272,7 @@ class LoginWindow(tk.Tk):
         tk.Label(
             frame,
             text="Username",
-            fg="#d9e2ec",
+            fg="white",
             bg="#101820"
         ).pack(
             anchor="w"
@@ -318,7 +295,7 @@ class LoginWindow(tk.Tk):
         tk.Label(
             frame,
             text="Password",
-            fg="#d9e2ec",
+            fg="white",
             bg="#101820"
         ).pack(
             anchor="w"
@@ -327,11 +304,11 @@ class LoginWindow(tk.Tk):
         self.password = ttk.Entry(
             frame,
             width=42,
-            show="•"
+            show="*"
         )
 
         self.password.pack(
-            pady=(5, 18)
+            pady=(5, 20)
         )
 
         ttk.Button(
@@ -339,31 +316,30 @@ class LoginWindow(tk.Tk):
             text="🔐 LOGIN",
             command=self.login
         ).pack(
-            ipadx=20,
+            ipadx=25,
             ipady=6
         )
+
+        self.password.focus()
 
         self.bind(
             "<Return>",
             lambda event: self.login()
         )
 
-        self.password.focus()
-
     def login(self):
 
         username = self.username.get().strip()
-
         password = self.password.get()
 
-        if check_login(
+        if verify_login(
             username,
             password
         ):
 
             self.destroy()
 
-            SecurityApp().mainloop()
+            SecurityApplication().mainloop()
 
         else:
 
@@ -374,17 +350,17 @@ class LoginWindow(tk.Tk):
 
 
 # ============================================================
-# 8. MAIN SECURITY APPLICATION
+# MAIN APPLICATION
 # ============================================================
 
-class SecurityApp(tk.Tk):
+class SecurityApplication(tk.Tk):
 
     def __init__(self):
 
         super().__init__()
 
         self.title(
-            "🛡️ Owner Security Manager"
+            APP_NAME
         )
 
         self.geometry(
@@ -403,13 +379,13 @@ class SecurityApp(tk.Tk):
             self.logout
         )
 
-        self.build_interface()
+        self.create_interface()
 
     # --------------------------------------------------------
-    # GUI
+    # INTERFACE
     # --------------------------------------------------------
 
-    def build_interface(self):
+    def create_interface(self):
 
         header = tk.Frame(
             self,
@@ -424,11 +400,7 @@ class SecurityApp(tk.Tk):
         tk.Label(
             header,
             text="🛡️ OWNER SECURITY MANAGER",
-            font=(
-                "Segoe UI",
-                18,
-                "bold"
-            ),
+            font=("Segoe UI", 18, "bold"),
             fg="white",
             bg="#101820"
         ).pack(
@@ -439,7 +411,7 @@ class SecurityApp(tk.Tk):
 
         tk.Label(
             header,
-            text="Owner: nuth112",
+            text=f"Owner: {OWNER_USERNAME}",
             fg="#b8c7d9",
             bg="#101820"
         ).pack(
@@ -455,57 +427,30 @@ class SecurityApp(tk.Tk):
             padx=20
         )
 
-        # ----------------------------------------------------
-        # MENU
-        # ----------------------------------------------------
+        # Navigation
 
-        menu = tk.Frame(
+        navigation = tk.Frame(
             self,
             bg="#e9eef3"
         )
 
-        menu.pack(
+        navigation.pack(
             fill="x"
         )
 
         buttons = [
-
-            (
-                "🦠 Scan File",
-                self.scan_file_dialog
-            ),
-
-            (
-                "📂 Scan Folder",
-                self.scan_folder_dialog
-            ),
-
-            (
-                "☣️ Quarantine",
-                self.show_quarantine
-            ),
-
-            (
-                "📁 File Manager",
-                self.file_manager
-            ),
-
-            (
-                "📊 History",
-                self.show_history
-            ),
-
-            (
-                "⚙️ Settings",
-                self.settings
-            )
-
+            ("🦠 Scan File", self.select_file),
+            ("📂 Scan Folder", self.select_folder),
+            ("☣️ Quarantine", self.open_quarantine),
+            ("📁 File Manager", self.open_file_manager),
+            ("📊 History", self.open_history),
+            ("⚙️ Settings", self.open_settings)
         ]
 
         for text, command in buttons:
 
             ttk.Button(
-                menu,
+                navigation,
                 text=text,
                 command=command
             ).pack(
@@ -514,21 +459,16 @@ class SecurityApp(tk.Tk):
                 pady=10
             )
 
-        # ----------------------------------------------------
-        # OUTPUT
-        # ----------------------------------------------------
+        # Console
 
-        self.output = tk.Text(
+        self.console = tk.Text(
             self,
             bg="#0b1220",
             fg="#d7e3f4",
-            font=(
-                "Consolas",
-                10
-            )
+            font=("Consolas", 10)
         )
 
-        self.output.pack(
+        self.console.pack(
             fill="both",
             expand=True,
             padx=15,
@@ -546,17 +486,15 @@ class SecurityApp(tk.Tk):
             bg="#101820",
             fg="white"
         ).pack(
-            fill="x",
-            padx=10,
-            pady=6
+            fill="x"
         )
 
         self.log(
-            "Welcome, Owner."
+            "Owner authentication successful."
         )
 
         self.log(
-            "Security Manager is ready."
+            "Security Manager ready."
         )
 
     # --------------------------------------------------------
@@ -565,59 +503,58 @@ class SecurityApp(tk.Tk):
 
     def log(self, message):
 
-        self.output.insert(
-            "end",
-            "["
-            + datetime.now().strftime("%H:%M:%S")
-            + "] "
-            + message
-            + "\n"
+        timestamp = datetime.now().strftime(
+            "%H:%M:%S"
         )
 
-        self.output.see(
+        self.console.insert(
+            "end",
+            f"[{timestamp}] {message}\n"
+        )
+
+        self.console.see(
             "end"
         )
 
     # --------------------------------------------------------
-    # SCAN FILE
+    # FILE SCAN
     # --------------------------------------------------------
 
-    def scan_file_dialog(self):
+    def select_file(self):
 
         if not self.scan_enabled:
 
             messagebox.showwarning(
                 "Scanner Disabled",
-                "Scanner is disabled."
+                "Enable the scanner first."
             )
 
             return
 
-        path = filedialog.askopenfilename(
-            title="Select file"
+        file_path = filedialog.askopenfilename(
+            title="Select File"
         )
 
-        if not path:
+        if not file_path:
 
             return
 
         self.status.set(
-            "Scanning..."
+            "Scanning file..."
         )
 
         self.log(
-            "Scanning: "
-            + path
+            f"Scanning: {file_path}"
         )
 
         def worker():
 
             result, details = scan_file(
-                path
+                file_path
             )
 
-            save_history(
-                path,
+            save_scan_history(
+                file_path,
                 result,
                 details
             )
@@ -625,8 +562,8 @@ class SecurityApp(tk.Tk):
             self.after(
                 0,
                 lambda:
-                self.scan_result(
-                    path,
+                self.display_scan_result(
+                    file_path,
                     result,
                     details
                 )
@@ -638,12 +575,12 @@ class SecurityApp(tk.Tk):
         ).start()
 
     # --------------------------------------------------------
-    # SCAN RESULT
+    # DISPLAY SCAN RESULT
     # --------------------------------------------------------
 
-    def scan_result(
+    def display_scan_result(
         self,
-        path,
+        file_path,
         result,
         details
     ):
@@ -655,36 +592,36 @@ class SecurityApp(tk.Tk):
         if result == "CLEAN":
 
             self.log(
-                "✅ CLEAN"
+                "✅ CLEAN - No malware detected."
             )
 
             messagebox.showinfo(
                 "Scan Result",
-                "✅ No malware detected."
+                "✅ File is clean."
             )
 
         elif result == "INFECTED":
 
             self.log(
-                "☣️ MALWARE DETECTED"
+                "☣️ MALWARE DETECTED!"
             )
 
             answer = messagebox.askyesno(
                 "Malware Detected",
                 "Malware was detected.\n\n"
-                "Move file to quarantine?"
+                "Move this file to quarantine?"
             )
 
             if answer:
 
-                self.quarantine_file(
-                    Path(path)
+                self.move_to_quarantine(
+                    Path(file_path)
                 )
 
         else:
 
             self.log(
-                "⚠️ Scanner Error"
+                "⚠️ Scanner error."
             )
 
             messagebox.showerror(
@@ -693,22 +630,22 @@ class SecurityApp(tk.Tk):
             )
 
     # --------------------------------------------------------
-    # SCAN FOLDER
+    # FOLDER SCAN
     # --------------------------------------------------------
 
-    def scan_folder_dialog(self):
+    def select_folder(self):
 
         if not self.scan_enabled:
 
             messagebox.showwarning(
                 "Scanner Disabled",
-                "Scanner is disabled."
+                "Enable the scanner first."
             )
 
             return
 
         folder = filedialog.askdirectory(
-            title="Select folder"
+            title="Select Folder"
         )
 
         if not folder:
@@ -720,8 +657,7 @@ class SecurityApp(tk.Tk):
         )
 
         self.log(
-            "Scanning folder: "
-            + folder
+            f"Scanning folder: {folder}"
         )
 
         def worker():
@@ -730,7 +666,7 @@ class SecurityApp(tk.Tk):
                 folder
             )
 
-            save_history(
+            save_scan_history(
                 folder,
                 result,
                 details
@@ -739,7 +675,7 @@ class SecurityApp(tk.Tk):
             self.after(
                 0,
                 lambda:
-                self.folder_result(
+                self.display_folder_result(
                     result,
                     details
                 )
@@ -750,11 +686,7 @@ class SecurityApp(tk.Tk):
             daemon=True
         ).start()
 
-    # --------------------------------------------------------
-    # FOLDER RESULT
-    # --------------------------------------------------------
-
-    def folder_result(
+    def display_folder_result(
         self,
         result,
         details
@@ -767,7 +699,7 @@ class SecurityApp(tk.Tk):
         if result == "CLEAN":
 
             self.log(
-                "✅ Folder CLEAN"
+                "✅ Folder clean."
             )
 
             messagebox.showinfo(
@@ -778,7 +710,7 @@ class SecurityApp(tk.Tk):
         elif result == "INFECTED":
 
             self.log(
-                "☣️ Malware detected."
+                "☣️ Malware detected in folder."
             )
 
             messagebox.showwarning(
@@ -797,7 +729,7 @@ class SecurityApp(tk.Tk):
     # QUARANTINE
     # --------------------------------------------------------
 
-    def quarantine_file(
+    def move_to_quarantine(
         self,
         source
     ):
@@ -808,14 +740,14 @@ class SecurityApp(tk.Tk):
 
                 return
 
-            target = (
+            destination = (
                 QUARANTINE_DIR
                 / source.name
             )
 
-            if target.exists():
+            if destination.exists():
 
-                target = (
+                destination = (
                     QUARANTINE_DIR
                     /
                     (
@@ -830,12 +762,11 @@ class SecurityApp(tk.Tk):
 
             shutil.move(
                 str(source),
-                str(target)
+                str(destination)
             )
 
             self.log(
-                "🔒 Quarantined: "
-                + str(target)
+                f"🔒 Quarantined: {destination.name}"
             )
 
             messagebox.showinfo(
@@ -843,18 +774,14 @@ class SecurityApp(tk.Tk):
                 "File moved to quarantine."
             )
 
-        except Exception as e:
+        except Exception as error:
 
             messagebox.showerror(
                 "Quarantine Error",
-                str(e)
+                str(error)
             )
 
-    # --------------------------------------------------------
-    # QUARANTINE WINDOW
-    # --------------------------------------------------------
-
-    def show_quarantine(self):
+    def open_quarantine(self):
 
         window = tk.Toplevel(
             self
@@ -870,15 +797,12 @@ class SecurityApp(tk.Tk):
 
         tree = ttk.Treeview(
             window,
-            columns=(
-                "name",
-                "size"
-            ),
-            show="headings"
+            columns=("size",),
+            show="tree headings"
         )
 
         tree.heading(
-            "name",
+            "#0",
             text="File"
         )
 
@@ -908,47 +832,49 @@ class SecurityApp(tk.Tk):
                         "",
                         "end",
                         iid=str(file),
+                        text=file.name,
                         values=(
-                            file.name,
-                            f"{file.stat().st_size:,} bytes"
+                            f"{file.stat().st_size:,} bytes",
                         )
                     )
 
-        def delete():
+        def delete_file():
 
             selected = tree.selection()
 
             if not selected:
 
+                messagebox.showwarning(
+                    "Select File",
+                    "Select a file first."
+                )
+
                 return
 
-            path = Path(
+            file_path = Path(
                 selected[0]
             )
 
-            answer = messagebox.askyesno(
+            if messagebox.askyesno(
                 "Delete",
-                "Permanently delete this file?"
-            )
-
-            if answer:
+                f"Permanently delete {file_path.name}?"
+            ):
 
                 try:
 
-                    path.unlink()
+                    file_path.unlink()
 
                     refresh()
 
                     self.log(
-                        "🗑️ Deleted: "
-                        + path.name
+                        f"🗑️ Deleted: {file_path.name}"
                     )
 
-                except Exception as e:
+                except Exception as error:
 
                     messagebox.showerror(
                         "Error",
-                        str(e)
+                        str(error)
                     )
 
         toolbar = tk.Frame(
@@ -971,8 +897,8 @@ class SecurityApp(tk.Tk):
 
         ttk.Button(
             toolbar,
-            text="🗑️ Delete",
-            command=delete
+            text="🗑️ Delete Permanently",
+            command=delete_file
         ).pack(
             side="left",
             padx=5
@@ -984,7 +910,7 @@ class SecurityApp(tk.Tk):
     # FILE MANAGER
     # --------------------------------------------------------
 
-    def file_manager(self):
+    def open_file_manager(self):
 
         window = tk.Toplevel(
             self
@@ -999,12 +925,12 @@ class SecurityApp(tk.Tk):
         )
 
         current = {
-            "path": Path.home()
+            "folder": Path.home()
         }
 
         path_var = tk.StringVar(
             value=str(
-                current["path"]
+                current["folder"]
             )
         )
 
@@ -1019,10 +945,7 @@ class SecurityApp(tk.Tk):
 
         tree = ttk.Treeview(
             window,
-            columns=(
-                "type",
-                "size"
-            ),
+            columns=("type", "size"),
             show="tree headings"
         )
 
@@ -1061,19 +984,17 @@ class SecurityApp(tk.Tk):
 
                 return
 
-            current["path"] = folder
+            current["folder"] = folder
 
             try:
 
-                items = sorted(
+                for item in sorted(
                     folder.iterdir(),
                     key=lambda x: (
                         not x.is_dir(),
                         x.name.lower()
                     )
-                )
-
-                for item in items:
+                ):
 
                     if item.is_dir():
 
@@ -1097,15 +1018,15 @@ class SecurityApp(tk.Tk):
                             text=item.name,
                             values=(
                                 "File",
-                                f"{item.stat().st_size:,} bytes"
+                                f"{item.stat().st_size:,}"
                             )
                         )
 
             except PermissionError:
 
                 messagebox.showerror(
-                    "Access denied",
-                    "You do not have permission to access this folder."
+                    "Permission Error",
+                    "Access denied."
                 )
 
         def open_item(event=None):
@@ -1136,11 +1057,11 @@ class SecurityApp(tk.Tk):
                         str(path)
                     )
 
-                except Exception as e:
+                except Exception as error:
 
                     messagebox.showerror(
                         "Open Error",
-                        str(e)
+                        str(error)
                     )
 
         def delete():
@@ -1155,12 +1076,10 @@ class SecurityApp(tk.Tk):
                 selected[0]
             )
 
-            answer = messagebox.askyesno(
+            if not messagebox.askyesno(
                 "Delete",
                 f"Delete {path.name}?"
-            )
-
-            if not answer:
+            ):
 
                 return
 
@@ -1179,15 +1098,14 @@ class SecurityApp(tk.Tk):
                 refresh()
 
                 self.log(
-                    "🗑️ Deleted: "
-                    + str(path)
+                    f"🗑️ Deleted: {path}"
                 )
 
-            except Exception as e:
+            except Exception as error:
 
                 messagebox.showerror(
                     "Delete Error",
-                    str(e)
+                    str(error)
                 )
 
         tree.bind(
@@ -1229,7 +1147,7 @@ class SecurityApp(tk.Tk):
     # HISTORY
     # --------------------------------------------------------
 
-    def show_history(self):
+    def open_history(self):
 
         window = tk.Toplevel(
             self
@@ -1268,11 +1186,6 @@ class SecurityApp(tk.Tk):
             text="Time"
         )
 
-        tree.column(
-            "path",
-            width=580
-        )
-
         tree.pack(
             fill="both",
             expand=True,
@@ -1280,18 +1193,21 @@ class SecurityApp(tk.Tk):
             pady=10
         )
 
-        con = database()
+        connection = get_database()
 
-        rows = con.execute(
+        rows = connection.execute(
             """
-            SELECT path,result,scan_time
+            SELECT
+                file_path,
+                result,
+                scan_time
             FROM scan_history
             ORDER BY id DESC
             LIMIT 500
             """
         ).fetchall()
 
-        con.close()
+        connection.close()
 
         for row in rows:
 
@@ -1305,7 +1221,7 @@ class SecurityApp(tk.Tk):
     # SETTINGS
     # --------------------------------------------------------
 
-    def settings(self):
+    def open_settings(self):
 
         window = tk.Toplevel(
             self
@@ -1325,12 +1241,8 @@ class SecurityApp(tk.Tk):
 
         ttk.Label(
             window,
-            text="⚙️ Scanner Settings",
-            font=(
-                "Segoe UI",
-                15,
-                "bold"
-            )
+            text="Scanner Settings",
+            font=("Segoe UI", 15, "bold")
         ).pack(
             pady=20
         )
@@ -1345,10 +1257,11 @@ class SecurityApp(tk.Tk):
 
         ttk.Label(
             window,
-            text=
-            "Scanner: ClamAV\n\n"
-            "Quarantine:\n"
-            + str(QUARANTINE_DIR),
+            text=(
+                "Engine: ClamAV\n\n"
+                "Quarantine:\n"
+                + str(QUARANTINE_DIR)
+            ),
             wraplength=450
         ).pack(
             pady=10
@@ -1359,10 +1272,13 @@ class SecurityApp(tk.Tk):
             self.scan_enabled = enabled.get()
 
             self.log(
-                "🟢 Scanner enabled."
-                if self.scan_enabled
-                else
-                "🔴 Scanner disabled."
+                "Scanner "
+                +
+                (
+                    "enabled."
+                    if self.scan_enabled
+                    else "disabled."
+                )
             )
 
             window.destroy()
@@ -1392,7 +1308,7 @@ class SecurityApp(tk.Tk):
 
 
 # ============================================================
-# 9. START PROGRAM
+# START
 # ============================================================
 
 if __name__ == "__main__":
