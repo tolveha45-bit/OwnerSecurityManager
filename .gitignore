@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+.venv/
+venv/
+
+*.db
+
+OwnerSecurityManager/
+quarantine/
+
+.vscode/
+.idea/
